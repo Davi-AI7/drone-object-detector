@@ -1,50 +1,69 @@
-#código-fonte inspirado nesse repositório https://github.com/arunponnusamy/cvlib
-import cv2
-import matplotlib.pyplot as plt
-import cvlib as cv
+from pathlib import Path
 import urllib.request
+import cv2
 import numpy as np
-from cvlib.object_detection import draw_bbox
-import concurrent.futures
- 
-url='http://192.168.7.51/cam-hi.jpg'
-im=None
-def run1():
-    cv2.namedWindow("live transmission", cv2.WINDOW_AUTOSIZE)
+import torch
+
+# Configurações da ESP32-CAM e do modelo
+ESP32_IP = "192.168.7.51"  # Substitua pelo IP exibido no Monitor Serial
+STREAM_URL = f"http://{ESP32_IP}/cam-hi.jpg"  # Opções: cam-lo.jpg, cam-mid.jpg, cam-hi.jpg
+CONFIDENCE_THRESHOLD = 0.50
+
+# Localiza model/best.pt independentemente da pasta de onde o terminal executar o script
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODEL_PATH = BASE_DIR / "model" / "best.pt"
+
+
+def carregar_modelo(caminho_pesos: Path):
+    if not caminho_pesos.exists():
+        raise FileNotFoundError(f"Arquivo de pesos não encontrado em: {caminho_pesos}")
+
+    modelo = torch.hub.load(
+        "ultralytics/yolov5",
+        "custom",
+        path=str(caminho_pesos),
+        trust_repo=True,
+    )
+    modelo.conf = CONFIDENCE_THRESHOLD
+    return modelo
+
+
+def capturar_frame(url: str, timeout: float = 5.0):
+    with urllib.request.urlopen(url, timeout=timeout) as resposta:
+        img_bytes = np.asarray(bytearray(resposta.read()), dtype=np.uint8)
+    return cv2.imdecode(img_bytes, cv2.IMREAD_COLOR)
+
+
+def main():
+    print("Carregando modelo YOLOv5 customizado...")
+    modelo = carregar_modelo(MODEL_PATH)
+    print(f"Conectando à ESP32-CAM em {STREAM_URL} (pressione 'q' para sair)...")
+
     while True:
-        img_resp=urllib.request.urlopen(url)
-        imgnp=np.array(bytearray(img_resp.read()),dtype=np.uint8)
-        im = cv2.imdecode(imgnp,-1)
- 
-        cv2.imshow('live transmission',im)
-        key=cv2.waitKey(5)
-        if key==ord('q'):
+        try:
+            frame_bgr = capturar_frame(STREAM_URL)
+            if frame_bgr is None:
+                continue
+
+            # YOLOv5 espera entrada em RGB; OpenCV captura em BGR
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            resultados = modelo(frame_rgb)
+
+            # Desenha as caixas delimitadoras e converte de volta para BGR
+            frame_anotado_rgb = resultados.render()[0]
+            frame_anotado_bgr = cv2.cvtColor(frame_anotado_rgb, cv2.COLOR_RGB2BGR)
+
+            cv2.imshow("ESP32-CAM - Ao Vivo", frame_bgr)
+            cv2.imshow("ESP32-CAM - Deteccao YOLOv5", frame_anotado_bgr)
+
+        except Exception as erro:
+            print(f"Erro na leitura do frame: {erro}")
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-            
+
     cv2.destroyAllWindows()
-        
-def run2():
-    cv2.namedWindow("detection", cv2.WINDOW_AUTOSIZE)
-    while True:
-        img_resp=urllib.request.urlopen(url)
-        imgnp=np.array(bytearray(img_resp.read()),dtype=np.uint8)
-        im = cv2.imdecode(imgnp,-1)
-        print(im)
- 
-        bbox, label, conf = cv.detect_common_objects(im, confidence=0.2, model='yolov3')
-        im = draw_bbox(im, bbox, label, conf)
- 
-        cv2.imshow('detection',im)
-        key=cv2.waitKey(5)
-        if key==ord('q'):
-            break
-            
-    cv2.destroyAllWindows()
- 
- 
- 
-if __name__ == '__main__':
-    print("PROGRAMA RODANDO DE BOAS")
-    with concurrent.futures.ProcessPoolExecutor() as executer:
-            f1= executer.submit(run1)
-            f2= executer.submit(run2)
+
+
+if __name__ == "__main__":
+    main()
